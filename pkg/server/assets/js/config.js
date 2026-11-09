@@ -1230,6 +1230,19 @@ class ConfigManager {
                             </select>
                             <span class="text-sm opacity-70">Which debrid service this Arr should prefer</span>
                         </div>
+
+                        <div>
+                            <label class="label" for="arr[${index}].download_action">
+                                <span class="font-medium">Download Action</span>
+                            </label>
+                            <select class="select w-full" name="arr[${index}].download_action" id="arr[${index}].download_action">
+                                <option value="">Inherit default</option>
+                                <option value="symlink">Create Symlink</option>
+                                <option value="download">Download Files</option>
+                                <option value="none">No Action</option>
+                            </select>
+                            <span class="text-sm opacity-70">Overrides the Default Download Action for this Arr</span>
+                        </div>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -1615,9 +1628,10 @@ class ConfigManager {
             const skipRepairInput = getField('skip_repair');
             const downloadUncachedInput = getField('download_uncached');
             const selectedDebridInput = getField('selected_debrid');
+            const downloadActionInput = getField('download_action');
             const sourceInput = getField('source');
 
-            if (!nameInput || !hostInput || !tokenInput || !skipRepairInput || !downloadUncachedInput || !selectedDebridInput || !sourceInput) {
+            if (!nameInput || !hostInput || !tokenInput || !skipRepairInput || !downloadUncachedInput || !selectedDebridInput || !downloadActionInput || !sourceInput) {
                 return;
             }
 
@@ -1627,6 +1641,10 @@ class ConfigManager {
                 token: tokenInput.value,
                 skip_repair: skipRepairInput.checked,
                 selected_debrid: selectedDebridInput.value,
+                // Always sent, "" for inherit: the server merges the posted arrs
+                // onto the stored ones by position, so an omitted field would
+                // keep whatever the Arr stored in that slot had.
+                download_action: downloadActionInput.value,
                 source: sourceInput.value
             };
 

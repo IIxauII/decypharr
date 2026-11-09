@@ -296,11 +296,7 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 
 	urls := r.FormValue("name")
 
-	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if r.FormValue("action") != "" {
-		action = config.DownloadAction(r.FormValue("action"))
-	}
+	action := downloadAction(r, _arr, config.Get().DefaultDownloadAction)
 
 	if urls == "" {
 		s.writeError(w, "URL is required", http.StatusBadRequest)
@@ -374,11 +370,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if r.FormValue("action") != "" {
-		action = config.DownloadAction(r.FormValue("action"))
-	}
+	action := downloadAction(r, _arr, config.Get().DefaultDownloadAction)
 
 	var nzoIDs []string
 	var errors []string
@@ -465,6 +457,13 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
+}
+
+// downloadAction picks the action for an add request. The request's action
+// field wins over the Arr's download_action.
+func downloadAction(r *http.Request, a arr.Arr, fallback config.DownloadAction) config.DownloadAction {
+	requested := config.DownloadAction(r.FormValue("action"))
+	return config.ResolveDownloadAction(requested, a.DownloadAction, fallback)
 }
 
 // handleVersion returns version information

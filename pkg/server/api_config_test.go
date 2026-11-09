@@ -87,6 +87,34 @@ func TestMergeConfigUpdateAllowsExplicitClear(t *testing.T) {
 	}
 }
 
+func TestMergeConfigUpdateKeepsDownloadActionPerArr(t *testing.T) {
+	current := config.Config{Arrs: []config.Arr{
+		{Name: "lidarr", Host: "http://lidarr:8686", Token: "lidarr-key", DownloadAction: config.DownloadActionDownload},
+		{Name: "sonarr", Host: "http://sonarr:8989", Token: "sonarr-key"},
+	}}
+	// GET lists arrs in map order, so the UI can post them in a different
+	// order than stored. It always sends download_action, "" for inherit.
+	update := `{"arrs":[
+		{"name":"sonarr","host":"http://sonarr:8989","token":"sonarr-key","download_action":""},
+		{"name":"lidarr","host":"http://lidarr:8686","token":"lidarr-key","download_action":"download"}
+	]}`
+
+	merged, err := mergeConfigUpdate(&current, strings.NewReader(update))
+	if err != nil {
+		t.Fatalf("merge config update: %v", err)
+	}
+
+	want := map[string]config.DownloadAction{"sonarr": "", "lidarr": config.DownloadActionDownload}
+	if len(merged.Arrs) != len(want) {
+		t.Fatalf("arrs = %#v", merged.Arrs)
+	}
+	for _, a := range merged.Arrs {
+		if a.DownloadAction != want[a.Name] {
+			t.Errorf("%s download_action = %q, want %q", a.Name, a.DownloadAction, want[a.Name])
+		}
+	}
+}
+
 func TestConfigHandlersUseSnapshots(t *testing.T) {
 	config.Reset()
 	config.SetConfigPath(t.TempDir())
