@@ -40,7 +40,10 @@ type Arr struct {
 	SkipRepair       bool   `json:"skip_repair"`
 	DownloadUncached *bool  `json:"download_uncached"`
 	SelectedDebrid   string `json:"selected_debrid,omitempty"`
-	Source           Source `json:"source,omitempty"`
+	// DownloadAction overrides the global default action for this instance.
+	// Empty inherits it.
+	DownloadAction config.DownloadAction `json:"download_action,omitempty"`
+	Source         Source                `json:"source,omitempty"`
 }
 
 // Reachable reports whether the instance carries enough to be called.
@@ -112,6 +115,7 @@ func fromConfig(c config.Arr) Arr {
 		SkipRepair:       c.SkipRepair,
 		DownloadUncached: c.DownloadUncached,
 		SelectedDebrid:   c.SelectedDebrid,
+		DownloadAction:   c.DownloadAction,
 		Source:           Source(c.Source),
 	}
 }
@@ -124,6 +128,7 @@ func (a Arr) toConfig() config.Arr {
 		SkipRepair:       a.SkipRepair,
 		DownloadUncached: a.DownloadUncached,
 		SelectedDebrid:   a.SelectedDebrid,
+		DownloadAction:   a.DownloadAction,
 		Source:           string(a.Source),
 	}
 }

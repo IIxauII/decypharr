@@ -108,10 +108,6 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if strings.ToLower(r.FormValue("sequentialDownload")) == "true" {
-		action = config.DownloadActionDownload
-	}
 
 	rmTrackerUrls := strings.ToLower(r.FormValue("firstLastPiecePrio")) == "true"
 
@@ -127,6 +123,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		// Arr is not in context
 		_arr = arr.Arr{Name: category}
 	}
+	action := downloadAction(r, _arr, cfg.DefaultDownloadAction)
 	atleastOne := false
 
 	// Handle magnet URLs
@@ -165,6 +162,16 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// downloadAction picks the action for an add request. Sequential Download is
+// the per-request choice (#110), so it wins over the Arr's download_action.
+func downloadAction(r *http.Request, a arr.Arr, fallback config.DownloadAction) config.DownloadAction {
+	var requested config.DownloadAction
+	if strings.ToLower(r.FormValue("sequentialDownload")) == "true" {
+		requested = config.DownloadActionDownload
+	}
+	return config.ResolveDownloadAction(requested, a.DownloadAction, fallback)
 }
 
 type torrentAddErrorResponse struct {

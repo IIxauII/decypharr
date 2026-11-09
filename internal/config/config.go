@@ -41,6 +41,28 @@ const (
 	DownloadActionNone     DownloadAction = "none"
 )
 
+// Valid reports whether a is an action the downloader implements.
+func (a DownloadAction) Valid() bool {
+	switch a {
+	case DownloadActionSymlink, DownloadActionDownload, DownloadActionNone:
+		return true
+	}
+	return false
+}
+
+// ResolveDownloadAction picks the action for one download: an explicit
+// per-request choice first, then the Arr's own download_action, then the
+// global default. Empty or unknown values fall through to the next level.
+func ResolveDownloadAction(requested, arrAction, fallback DownloadAction) DownloadAction {
+	if requested.Valid() {
+		return requested
+	}
+	if arrAction.Valid() {
+		return arrAction
+	}
+	return fallback
+}
+
 const (
 	WebDavUseFileName          WebDavFolderNaming = "filename"
 	WebDavUseOriginalName      WebDavFolderNaming = "original"
@@ -70,11 +92,13 @@ type Arr struct {
 	SkipRepair       bool   `json:"skip_repair,omitempty"`
 	DownloadUncached *bool  `json:"download_uncached,omitempty"`
 	SelectedDebrid   string `json:"selected_debrid,omitempty"`
-	Source           string `json:"source,omitempty"` // The source of the arr, e.g. "auto", "config", "". Auto means it was automatically detected from the arr
+	// DownloadAction overrides DefaultDownloadAction for this Arr. Empty inherits it.
+	DownloadAction DownloadAction `json:"download_action,omitempty"`
+	Source         string         `json:"source,omitempty"` // The source of the arr, e.g. "auto", "config", "". Auto means it was automatically detected from the arr
 }
 
 func (a Arr) IsZero() bool {
-	return a.Name == "" && a.Host == "" && a.Token == "" && !a.SkipRepair && a.DownloadUncached == nil && a.SelectedDebrid == "" && a.Source == ""
+	return a.Name == "" && a.Host == "" && a.Token == "" && !a.SkipRepair && a.DownloadUncached == nil && a.SelectedDebrid == "" && a.DownloadAction == "" && a.Source == ""
 }
 
 // QueueCleanup is the global policy that drives CleanupQueue. It maps
