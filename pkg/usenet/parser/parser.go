@@ -148,8 +148,7 @@ var (
 	// RAR file patterns - simplified and more accurate
 	rarMainPattern       = regexp.MustCompile(`\.rar$`)
 	rarPartPattern       = regexp.MustCompile(`(?:\.r\d{2,3}|\.[s-y]\d{2})$`) // .r00..r999, then .s00 etc.; .zNN is ZIP
-	rarVolumePattern     = regexp.MustCompile(`\.part\d+\.rar$`)
-	rarPartNumberPattern = regexp.MustCompile(`\.part(\d+)$`) // volume number, with .rar trimmed
+	rarVolumePattern     = regexp.MustCompile(`\.part(\d+)\.rar$`)            // group 1: the volume number
 	ignoreExtensions     = []string{".sfv", ".nfo", ".jpg", ".png", ".txt", ".srt", ".idx", ".sub", ".par2"}
 	sevenZMainPattern    = regexp.MustCompile(`\.7z$`)
 	sevenZPartPattern    = regexp.MustCompile(`\.7z\.\d{3}$`)
@@ -647,7 +646,7 @@ func (p *NZBParser) detectFileType(filename string) storage.NZBFileType {
 	}
 
 	// Check for 7z files
-	if sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower) {
+	if isSevenZVolumeName(lower) {
 		return storage.NZBFileTypeSevenZip
 	}
 
@@ -820,11 +819,12 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 	if len(firstFile.Segments) == 0 {
 		return fmt.Errorf("no Segments in reference file of group %s", group.BaseName)
 	}
-	// A stray file named after the release, such as a playlist, sorts after
-	// an archive's volumes; the last real volume is the one to size.
+	// A stray file named after the release, such as a playlist, can sort
+	// after an archive's volumes; the last real volume is the one to size.
+	// Other groups keep their last file.
 	lastFile := group.Files[len(group.Files)-1]
 	for i := len(group.Files) - 1; i >= 0; i-- {
-		if hasVolumeName(group.Type, group.Files[i].Filename) {
+		if isArchiveVolumeName(group.Type, group.Files[i].Filename) {
 			lastFile = group.Files[i]
 			break
 		}

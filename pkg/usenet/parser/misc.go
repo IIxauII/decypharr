@@ -14,6 +14,9 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
+// rarUnknownVolumeOrder is the volume key of a name that is no RAR volume.
+const rarUnknownVolumeOrder = 999999
+
 // getRARVolumeOrder returns a sort key for RAR volume ordering.
 // .rar or .part01.rar = 0 (first volume)
 // .r00 = 1, .r01 = 2, etc.; legacy sequences may continue at .s00.
@@ -21,12 +24,11 @@ import (
 func getRARVolumeOrder(filename string) int {
 	lower := strings.ToLower(filename)
 	ext := filepath.Ext(lower)
-	base := strings.TrimSuffix(lower, ext)
 
 	// Old-style naming: .rar, .r00, .r01, ...
 	if ext == ".rar" {
 		// Check for .partXX.rar pattern (new style)
-		if matches := rarPartNumberPattern.FindStringSubmatch(base); len(matches) == 2 {
+		if matches := rarVolumePattern.FindStringSubmatch(lower); len(matches) == 2 {
 			num, _ := strconv.Atoi(matches[1])
 			return num // .part01.rar = 1, .part02.rar = 2
 		}
@@ -53,8 +55,9 @@ func getRARVolumeOrder(filename string) int {
 	return rarUnknownVolumeOrder
 }
 
-// rarUnknownVolumeOrder is the volume key of a name that is no RAR volume.
-const rarUnknownVolumeOrder = 999999
+// zipUnknownVolumeOrder is the volume key of a name that is no ZIP volume. It
+// sorts after the .zNN parts and before the terminal .zip.
+const zipUnknownVolumeOrder = int(^uint(0)>>1) - 1
 
 // getZIPVolumeOrder puts split volumes (.z01, .z02, ..., .z100) before the
 // terminal .zip file. Numeric comparison avoids lexicographic z100/z99 bugs.
@@ -69,7 +72,7 @@ func getZIPVolumeOrder(filename string) int {
 			return num
 		}
 	}
-	return int(^uint(0)>>1) - 1
+	return zipUnknownVolumeOrder
 }
 
 // sortGroupFiles puts a group's posted files in the order its processor reads
@@ -104,20 +107,26 @@ func sortGroupFiles(group *FileGroup) {
 	})
 }
 
-// hasVolumeName reports whether name is a volume name of the archive type
-// fileType. Every name counts for other types.
-func hasVolumeName(fileType storage.NZBFileType, name string) bool {
-	lower := strings.ToLower(name)
+// isArchiveVolumeName reports whether name is a volume of the archive type
+// fileType; it is false for every other type. A RAR or ZIP name is a volume
+// when it has a volume key, the key sortGroupFiles orders by.
+func isArchiveVolumeName(fileType storage.NZBFileType, name string) bool {
 	switch fileType {
 	case storage.NZBFileTypeRar:
-		return getRARVolumeOrder(lower) != rarUnknownVolumeOrder
+		return getRARVolumeOrder(name) != rarUnknownVolumeOrder
 	case storage.NZBFileTypeZip:
-		return strings.HasSuffix(lower, ".zip") || zipPartPattern.MatchString(lower)
+		return getZIPVolumeOrder(name) != zipUnknownVolumeOrder
 	case storage.NZBFileTypeSevenZip:
-		return sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower)
+		return isSevenZVolumeName(strings.ToLower(name))
 	default:
-		return true
+		return false
 	}
+}
+
+// isSevenZVolumeName reports whether lower, a lowercased name, is a 7z volume
+// (.7z or .7z.NNN).
+func isSevenZVolumeName(lower string) bool {
+	return sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower)
 }
 
 func wrapNZBFile(f *storage.NZBFile) ([]*storage.NZBFile, error) {

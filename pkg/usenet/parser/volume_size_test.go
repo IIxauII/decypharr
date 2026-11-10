@@ -190,7 +190,9 @@ func TestRARVolumeSizesIgnoreSubjectFileOrder(t *testing.T) {
 
 func TestSplitArchiveVolumeSizesIgnoreSubjectFileOrder(t *testing.T) {
 	// Two full four-article volumes and a short last one, whose subject
-	// numbers it first. NZB byte counts are decoded sizes.
+	// numbers it first. NZB byte counts are decoded sizes. A stray playlist
+	// named after the release joins the group: it sorts after 7z volumes and
+	// before the .zip of a ZIP set.
 	sizes := [3]int64{400, 400, 150}
 	numbers := [3]int{2, 3, 1}
 	for _, tc := range []struct {
@@ -216,6 +218,9 @@ func TestSplitArchiveVolumeSizesIgnoreSubjectFileOrder(t *testing.T) {
 				want[name] = sizes[v]
 				group.Files = append(group.Files, file)
 			}
+			stray := manifest.File{Filename: "a.m3u", Number: 4, Order: 3, Segments: []manifest.Segment{{Number: 1, MessageID: "a.m3u.1", Bytes: 30}}}
+			headers["a.m3u.1"] = &nntp.YencMetadata{Name: stray.Filename, Size: 30, PartSize: 30}
+			group.Files = append(group.Files, stray)
 
 			p := NewParserWithSource(headers, 2, zerolog.Nop())
 			if err := p.enrichGroupWithFileInfo(t.Context(), group); err != nil {
@@ -226,8 +231,8 @@ func TestSplitArchiveVolumeSizesIgnoreSubjectFileOrder(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, volume := range volumes {
-				if volume.Size != want[volume.Name] {
-					t.Errorf("volume %s sized %d bytes, want %d", volume.Name, volume.Size, want[volume.Name])
+				if size, ok := want[volume.Name]; ok && volume.Size != size {
+					t.Errorf("volume %s sized %d bytes, want %d", volume.Name, volume.Size, size)
 				}
 			}
 		})
@@ -264,7 +269,9 @@ func TestSortGroupFilesBreaksTiesByNZBOrder(t *testing.T) {
 	}
 }
 
-// headerSource serves the yEnc headers of the articles it holds.
+// headerSource serves the yEnc headers of the articles it holds. It stands in
+// for the article broker because fakeArticleBackend gives every article the
+// same header.
 type headerSource map[string]*nntp.YencMetadata
 
 func (s headerSource) Header(_ context.Context, messageID string, _ int) (*nntp.YencMetadata, error) {
