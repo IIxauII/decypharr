@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +14,9 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
+// rarUnknownVolumeOrder is the volume key of a name that is no RAR volume.
+const rarUnknownVolumeOrder = 999999
+
 // getRARVolumeOrder returns a sort key for RAR volume ordering.
 // .rar or .part01.rar = 0 (first volume)
 // .r00 = 1, .r01 = 2, etc.; legacy sequences may continue at .s00.
@@ -22,13 +24,11 @@ import (
 func getRARVolumeOrder(filename string) int {
 	lower := strings.ToLower(filename)
 	ext := filepath.Ext(lower)
-	base := strings.TrimSuffix(lower, ext)
 
 	// Old-style naming: .rar, .r00, .r01, ...
 	if ext == ".rar" {
 		// Check for .partXX.rar pattern (new style)
-		partPattern := regexp.MustCompile(`\.part(\d+)$`)
-		if matches := partPattern.FindStringSubmatch(base); len(matches) == 2 {
+		if matches := rarVolumePattern.FindStringSubmatch(lower); len(matches) == 2 {
 			num, _ := strconv.Atoi(matches[1])
 			return num // .part01.rar = 1, .part02.rar = 2
 		}
@@ -52,8 +52,12 @@ func getRARVolumeOrder(filename string) int {
 	}
 
 	// Unknown pattern, put at end
-	return 999999
+	return rarUnknownVolumeOrder
 }
+
+// zipUnknownVolumeOrder is the volume key of a name that is no ZIP volume. It
+// sorts after the .zNN parts and before the terminal .zip.
+const zipUnknownVolumeOrder = int(^uint(0)>>1) - 1
 
 // getZIPVolumeOrder puts split volumes (.z01, .z02, ..., .z100) before the
 // terminal .zip file. Numeric comparison avoids lexicographic z100/z99 bugs.
@@ -68,7 +72,61 @@ func getZIPVolumeOrder(filename string) int {
 			return num
 		}
 	}
-	return int(^uint(0)>>1) - 1
+	return zipUnknownVolumeOrder
+}
+
+// sortGroupFiles puts a group's posted files in the order its processor reads
+// them: RAR and ZIP files by volume key, then subject file number; 7z files by
+// filename; everything else by subject file number. NZB order breaks every
+// remaining tie, so the order is total and sorting twice cannot change it.
+// RAR and ZIP names with no volume key, such as obfuscated ones, share one
+// key and fall back to file number and NZB order.
+func sortGroupFiles(group *FileGroup) {
+	files := group.Files
+	sort.Slice(files, func(i, j int) bool {
+		a, b := &files[i], &files[j]
+		switch group.Type {
+		case storage.NZBFileTypeRar:
+			if ka, kb := getRARVolumeOrder(a.Filename), getRARVolumeOrder(b.Filename); ka != kb {
+				return ka < kb
+			}
+		case storage.NZBFileTypeZip:
+			if ka, kb := getZIPVolumeOrder(a.Filename), getZIPVolumeOrder(b.Filename); ka != kb {
+				return ka < kb
+			}
+		case storage.NZBFileTypeSevenZip:
+			if a.Filename != b.Filename {
+				return a.Filename < b.Filename
+			}
+			return a.Order < b.Order
+		}
+		if a.Number != b.Number {
+			return a.Number < b.Number
+		}
+		return a.Order < b.Order
+	})
+}
+
+// isArchiveVolumeName reports whether name is a volume of the archive type
+// fileType; it is false for every other type. A RAR or ZIP name is a volume
+// when it has a volume key, the key sortGroupFiles orders by.
+func isArchiveVolumeName(fileType storage.NZBFileType, name string) bool {
+	switch fileType {
+	case storage.NZBFileTypeRar:
+		return getRARVolumeOrder(name) != rarUnknownVolumeOrder
+	case storage.NZBFileTypeZip:
+		return getZIPVolumeOrder(name) != zipUnknownVolumeOrder
+	case storage.NZBFileTypeSevenZip:
+		return isSevenZVolumeName(strings.ToLower(name))
+	default:
+		return false
+	}
+}
+
+// isSevenZVolumeName reports whether lower, a lowercased name, is a 7z volume
+// (.7z or .7z.NNN).
+func isSevenZVolumeName(lower string) bool {
+	return sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower)
 }
 
 func wrapNZBFile(f *storage.NZBFile) ([]*storage.NZBFile, error) {

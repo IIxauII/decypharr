@@ -9,7 +9,6 @@ import (
 	"io"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/rs/zerolog"
@@ -71,14 +70,7 @@ func NewZIPParser(source ArticleSource, _ int, logger zerolog.Logger) *ZIPParser
 }
 
 func (p *ZIPParser) Process(ctx context.Context, group *FileGroup, password string) ([]*storage.NZBFile, error) {
-	sort.Slice(group.Files, func(i, j int) bool {
-		oi := getZIPVolumeOrder(group.Files[i].Filename)
-		oj := getZIPVolumeOrder(group.Files[j].Filename)
-		if oi != oj {
-			return oi < oj
-		}
-		return group.Files[i].Filename < group.Files[j].Filename
-	})
+	sortGroupFiles(group)
 
 	volumes, err := buildArchiveVolumeDescriptors(group)
 	if err != nil {

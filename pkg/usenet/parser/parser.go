@@ -148,7 +148,7 @@ var (
 	// RAR file patterns - simplified and more accurate
 	rarMainPattern       = regexp.MustCompile(`\.rar$`)
 	rarPartPattern       = regexp.MustCompile(`(?:\.r\d{2,3}|\.[s-y]\d{2})$`) // .r00..r999, then .s00 etc.; .zNN is ZIP
-	rarVolumePattern     = regexp.MustCompile(`\.part\d+\.rar$`)
+	rarVolumePattern     = regexp.MustCompile(`\.part(\d+)\.rar$`)            // group 1: the volume number
 	ignoreExtensions     = []string{".sfv", ".nfo", ".jpg", ".png", ".txt", ".srt", ".idx", ".sub", ".par2"}
 	sevenZMainPattern    = regexp.MustCompile(`\.7z$`)
 	sevenZPartPattern    = regexp.MustCompile(`\.7z\.\d{3}$`)
@@ -646,7 +646,7 @@ func (p *NZBParser) detectFileType(filename string) storage.NZBFileType {
 	}
 
 	// Check for 7z files
-	if sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower) {
+	if isSevenZVolumeName(lower) {
 		return storage.NZBFileTypeSevenZip
 	}
 
@@ -803,12 +803,7 @@ func (p *NZBParser) processFileGroup(ctx context.Context, group *FileGroup, pass
 }
 
 func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGroup) error {
-	sort.Slice(group.Files, func(i, j int) bool {
-		if group.Files[i].Number != group.Files[j].Number {
-			return group.Files[i].Number < group.Files[j].Number
-		}
-		return group.Files[i].Filename < group.Files[j].Filename
-	})
+	sortGroupFiles(group)
 
 	firstFile := group.Files[0]
 	// Find the file with the most segments to use as the reference for segment size
@@ -824,7 +819,16 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 	if len(firstFile.Segments) == 0 {
 		return fmt.Errorf("no Segments in reference file of group %s", group.BaseName)
 	}
+	// A stray file named after the release, such as a playlist, can sort
+	// after an archive's volumes; the last real volume is the one to size.
+	// Other groups keep their last file.
 	lastFile := group.Files[len(group.Files)-1]
+	for i := len(group.Files) - 1; i >= 0; i-- {
+		if isArchiveVolumeName(group.Type, group.Files[i].Filename) {
+			lastFile = group.Files[i]
+			break
+		}
+	}
 
 	// If first and last are the same file, only need one fetch
 	sameFile := len(group.Files) == 1
@@ -945,9 +949,7 @@ func (p *NZBParser) processMediaFile(group *FileGroup, password string) *storage
 	}
 
 	// Sort files for consistent ordering
-	sort.Slice(group.Files, func(i, j int) bool {
-		return group.Files[i].Number < group.Files[j].Number
-	})
+	sortGroupFiles(group)
 
 	// Determine extension
 	ext := determineExtension(group)
