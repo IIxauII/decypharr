@@ -3,6 +3,7 @@ package usenet
 import (
 	"context"
 	"crypto/cipher"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,7 +12,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/crypto"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sourcegraph/conc/pool"
 )
 
@@ -47,8 +47,13 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	write := writer.Write
 	var decrypter *cbcDecrypter
 	if file.IsEncrypted {
-		if decrypter, err = newCBCDecrypter(writer, file); err != nil {
-			return err
+		if len(file.EncryptionKey) == 0 {
+			return customerror.NewPermanentError(fmt.Errorf("%s is encrypted and the NZB has no password", file.Name))
+		}
+		// The stored size, key and IV won't change on a retry, so a bad one is
+		// permanent.
+		if decrypter, err = newCBCDecrypter(writer, file.EncryptionKey, file.EncryptionIV, file.Size); err != nil {
+			return customerror.NewPermanentError(fmt.Errorf("decrypt %s: %w", file.Name, err))
 		}
 		write = decrypter.write
 	}
@@ -192,7 +197,7 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	}
 	if decrypter != nil {
 		if err := decrypter.finish(); err != nil {
-			return err
+			return fmt.Errorf("decrypt %s: %w", file.Name, err)
 		}
 	}
 
@@ -218,18 +223,17 @@ type cbcDecrypter struct {
 	left  int64                  // plaintext bytes still to write
 }
 
-func newCBCDecrypter(w io.Writer, file *storage.NZBFile) (*cbcDecrypter, error) {
-	if len(file.EncryptionKey) == 0 {
-		return nil, customerror.NewPermanentError(fmt.Errorf("%s is encrypted and the NZB has no password", file.Name))
+// newCBCDecrypter returns a decrypter that writes the first size bytes of
+// plaintext to w.
+func newCBCDecrypter(w io.Writer, key, iv []byte, size int64) (*cbcDecrypter, error) {
+	if size <= 0 {
+		return nil, errors.New("the file has no size")
 	}
-	if file.Size <= 0 {
-		return nil, customerror.NewPermanentError(fmt.Errorf("encrypted file %s has no size", file.Name))
-	}
-	mode, err := crypto.NewDecrypter(file.EncryptionKey, file.EncryptionIV)
+	mode, err := crypto.NewDecrypter(key, iv)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt %s: %w", file.Name, err)
+		return nil, err
 	}
-	return &cbcDecrypter{w: w, mode: mode, left: file.Size}, nil
+	return &cbcDecrypter{w: w, mode: mode, left: size}, nil
 }
 
 // write decrypts p in place, after any partial block carried from the last

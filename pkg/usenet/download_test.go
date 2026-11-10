@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
+	"math/rand/v2"
 	"strings"
 	"testing"
 
@@ -28,12 +29,12 @@ const (
 
 func TestDownloadWritesArchiveMemberPlaintext(t *testing.T) {
 	// 600009 bytes: not a multiple of the AES block, so the encrypted member
-	// carries 7 bytes of padding, and longer than one copy buffer.
+	// carries 7 bytes of padding, and several articles long. Seeded random
+	// bytes don't repeat, so data at a wrong offset can't match by accident
+	// (nntpd.Pattern repeats every 251 bytes).
 	plain := make([]byte, 600009)
+	_, _ = rand.NewChaCha8([32]byte{}).Read(plain)
 	copy(plain, "fLaC")
-	for i := 4; i < len(plain); i++ {
-		plain[i] = byte(i*7 + i/251)
-	}
 
 	for _, tc := range []struct {
 		name      string
@@ -49,7 +50,7 @@ func TestDownloadWritesArchiveMemberPlaintext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			const member = "01 - Track.flac"
 			server, u := newDownloadTestUsenet(t)
-			source := postRAR5Member(t, server, member, plain, tc.encrypted, tc.cuts)
+			source, volumeOf := postRAR5Member(t, server, member, plain, tc.encrypted, tc.cuts)
 
 			nzb, groups, err := u.Parse(t.Context(), "album.nzb", []byte(source), "lidarr")
 			if err != nil {
@@ -73,9 +74,13 @@ func TestDownloadWritesArchiveMemberPlaintext(t *testing.T) {
 			if file.IsEncrypted != tc.encrypted || file.Size != int64(len(plain)) {
 				t.Fatalf("parsed member encrypted=%v size=%d, want encrypted=%v size=%d", file.IsEncrypted, file.Size, tc.encrypted, len(plain))
 			}
-			spanned := map[string]bool{}
+			spanned := map[int]bool{}
 			for _, seg := range file.Segments {
-				spanned[seg.MessageID[:strings.LastIndexByte(seg.MessageID, '.')]] = true
+				v, ok := volumeOf[seg.MessageID]
+				if !ok {
+					t.Fatalf("segment %q is not a posted article", seg.MessageID)
+				}
+				spanned[v] = true
 			}
 			if len(spanned) != len(tc.cuts)+1 {
 				t.Fatalf("member data spans %d volumes, want %d", len(spanned), len(tc.cuts)+1)
@@ -101,71 +106,84 @@ func TestDownloadWritesArchiveMemberPlaintext(t *testing.T) {
 	}
 }
 
-func TestDownloadRejectsEncryptedMemberWithoutPassword(t *testing.T) {
-	server, u := newDownloadTestUsenet(t)
-	source := postRAR5Member(t, server, "01 - Track.flac", []byte("fLaC and the rest of the track"), true, nil)
-	// Without the password the parser still marks the member encrypted, but
-	// derives no key.
-	source = strings.Replace(source, `<meta type="password">`+downloadTestPassword+`</meta>`, "", 1)
+func TestDownloadRejectsUndecryptableMember(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		noPassword bool                   // post the NZB without its password
+		edit       func(*storage.NZBFile) // change the stored member before the download
+		wantErr    string
+	}{
+		{name: "no password", noPassword: true, wantErr: "password"},
+		// The parser never leaves a member at size 0 (it falls back to the
+		// segment total), so store one.
+		{name: "no size", edit: func(f *storage.NZBFile) { f.Size = 0 }, wantErr: "no size"},
+		{name: "no IV", edit: func(f *storage.NZBFile) { f.EncryptionIV = nil }, wantErr: "invalid IV size"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, u := newDownloadTestUsenet(t)
+			source, _ := postRAR5Member(t, server, "01 - Track.flac", []byte("fLaC and the rest of the track"), true, nil)
+			if tc.noPassword {
+				// Without the password the parser still marks the member
+				// encrypted, but derives no key.
+				source = strings.Replace(source, `<meta type="password">`+downloadTestPassword+`</meta>`, "", 1)
+			}
 
-	nzb, groups, err := u.Parse(t.Context(), "album.nzb", []byte(source), "lidarr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if nzb, err = u.Process(t.Context(), nzb, groups); err != nil {
-		t.Fatal(err)
-	}
-	if len(nzb.Files) != 1 || !nzb.Files[0].IsEncrypted {
-		t.Fatalf("parsed NZB files = %+v, want one encrypted member", nzb.Files)
-	}
+			nzb, groups, err := u.Parse(t.Context(), "album.nzb", []byte(source), "lidarr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nzb, err = u.Process(t.Context(), nzb, groups); err != nil {
+				t.Fatal(err)
+			}
+			if len(nzb.Files) != 1 || !nzb.Files[0].IsEncrypted {
+				t.Fatalf("parsed NZB files = %+v, want one encrypted member", nzb.Files)
+			}
+			if tc.edit != nil {
+				tc.edit(&nzb.Files[0])
+				if err := u.nzbStorage.AddNZB(nzb); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	var out bytes.Buffer
-	err = u.Download(t.Context(), nzb.ID, nzb.Files[0].Name, &out, nil)
-	if err == nil || !strings.Contains(err.Error(), "password") {
-		t.Fatalf("Download error = %v, want one naming the missing password", err)
-	}
-	if !customerror.IsPermanentError(err) || customerror.IsSilentError(err) {
-		t.Fatalf("Download error %v: permanent=%v silent=%v, want permanent and not silent",
-			err, customerror.IsPermanentError(err), customerror.IsSilentError(err))
-	}
-	if out.Len() != 0 {
-		t.Fatalf("Download wrote %d bytes, want none", out.Len())
+			var out bytes.Buffer
+			err = u.Download(t.Context(), nzb.ID, nzb.Files[0].Name, &out, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Download error = %v, want one containing %q", err, tc.wantErr)
+			}
+			if !customerror.IsPermanentError(err) || customerror.IsSilentError(err) {
+				t.Fatalf("Download error %v: permanent=%v silent=%v, want permanent and not silent",
+					err, customerror.IsPermanentError(err), customerror.IsSilentError(err))
+			}
+			if out.Len() != 0 {
+				t.Fatalf("Download wrote %d bytes, want none", out.Len())
+			}
+		})
 	}
 }
 
-func TestCBCDecrypterRejectsIncompleteCiphertext(t *testing.T) {
+func TestCBCDecrypterWriteBoundaries(t *testing.T) {
 	key := bytes.Repeat([]byte{0x11}, 32)
 	iv := bytes.Repeat([]byte{0x22}, aes.BlockSize)
 	plain := []byte("forty bytes of plaintext, then padding.!")
-	packed := make([]byte, 48)
-	copy(packed, plain)
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cipher.NewCBCEncrypter(block, iv).CryptBlocks(packed, packed)
+	packed := encryptCBC(t, key, iv, plain)
 
 	for _, tc := range []struct {
-		name      string
-		size      int64
-		stream    int    // ciphertext bytes fed in
-		writes    []int  // sizes of the writes before the last, which takes the rest
-		wantErr   string // empty: the plaintext comes out whole
-		permanent bool
+		name    string
+		stream  int    // ciphertext bytes fed in
+		writes  []int  // sizes of the writes before the last, which takes the rest
+		wantErr string // empty: the plaintext comes out whole
 	}{
-		{name: "one write", size: 40, stream: 48},
-		{name: "7-byte writes", size: 40, stream: 48, writes: []int{7, 7, 7, 7, 7, 7}},
+		{name: "one write", stream: 48},
+		{name: "7-byte writes", stream: 48, writes: []int{7, 7, 7, 7, 7, 7}},
 		// The 3-byte write leaves the carried block still short of 16 bytes.
-		{name: "write shorter than the carry needs", size: 40, stream: 48, writes: []int{20, 3}},
-		{name: "ends mid-block", size: 40, stream: 45, writes: []int{7, 7, 7, 7, 7, 7}, wantErr: "13 bytes into an AES block"},
-		{name: "ends short of the size", size: 40, stream: 32, writes: []int{20}, wantErr: "8 bytes short"},
-		{name: "no size", size: 0, stream: 48, wantErr: "no size", permanent: true},
+		{name: "write shorter than the carry needs", stream: 48, writes: []int{20, 3}},
+		{name: "ends mid-block", stream: 45, writes: []int{7, 7, 7, 7, 7, 7}, wantErr: "13 bytes into an AES block"},
+		{name: "ends short of the size", stream: 32, writes: []int{20}, wantErr: "8 bytes short"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			file := &storage.NZBFile{Name: "track.flac", Size: tc.size, IsEncrypted: true, EncryptionKey: key, EncryptionIV: iv}
 			err := func() error {
-				d, err := newCBCDecrypter(&out, file)
+				d, err := newCBCDecrypter(&out, key, iv, int64(len(plain)))
 				if err != nil {
 					return err
 				}
@@ -191,9 +209,11 @@ func TestCBCDecrypterRejectsIncompleteCiphertext(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want one containing %q", err, tc.wantErr)
 			}
-			if customerror.IsPermanentError(err) != tc.permanent || customerror.IsSilentError(err) {
-				t.Fatalf("err %v: permanent=%v silent=%v, want permanent=%v and not silent",
-					err, customerror.IsPermanentError(err), customerror.IsSilentError(err), tc.permanent)
+			// A short stream can come from a bad fetch, so it stays retryable,
+			// and it must reach the logs.
+			if customerror.IsPermanentError(err) || customerror.IsSilentError(err) {
+				t.Fatalf("err %v: permanent=%v silent=%v, want neither",
+					err, customerror.IsPermanentError(err), customerror.IsSilentError(err))
 			}
 		})
 	}
@@ -229,13 +249,15 @@ func newDownloadTestUsenet(t *testing.T) (*nntpd.Server, *Usenet) {
 
 // postRAR5Member stores one RAR5 member as a stored (uncompressed) archive,
 // split into volumes at cuts, posts every volume as several articles and
-// returns the NZB. An encrypted member is one AES-256-CBC chain over the whole
-// member, keyed and IV'd from the first volume, as RAR5 writes it, and its NZB
-// carries the password.
-func postRAR5Member(t *testing.T, server *nntpd.Server, member string, plain []byte, encrypted bool, cuts []int) string {
+// returns the NZB and each article's volume index, by message ID. An
+// encrypted member is one AES-256-CBC chain over the whole member, keyed and
+// IV'd from the first volume, as RAR5 writes it, and its NZB carries the
+// password. The later volumes' encryption records carry a different IV, which
+// the chain must ignore.
+func postRAR5Member(t *testing.T, server *nntpd.Server, member string, plain []byte, encrypted bool, cuts []int) (string, map[string]int) {
 	t.Helper()
 	packed := plain
-	var extra []byte
+	var firstExtra, laterExtra []byte
 	head := "<head></head>"
 	if encrypted {
 		head = `<head><meta type="password">` + downloadTestPassword + `</meta></head>`
@@ -244,35 +266,58 @@ func postRAR5Member(t *testing.T, server *nntpd.Server, member string, plain []b
 			t.Fatal(err)
 		}
 		iv := bytes.Repeat([]byte{0x5c}, aes.BlockSize)
-		packed = make([]byte, (len(plain)+aes.BlockSize-1)/aes.BlockSize*aes.BlockSize)
-		copy(packed, plain)
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cipher.NewCBCEncrypter(block, iv).CryptBlocks(packed, packed)
-
-		// Encryption record: type, version 0, flags 0, KDF count, salt, IV.
-		record := []byte{0x01, 0x00, 0x00, downloadTestKDF}
-		record = append(record, make([]byte, 16)...)
-		record = append(record, iv...)
-		extra = append(binary.AppendUvarint(nil, uint64(len(record))), record...)
+		packed = encryptCBC(t, key, iv, plain)
+		firstExtra = rar5EncryptionExtra(iv)
+		laterExtra = rar5EncryptionExtra(bytes.Repeat([]byte{0xa3}, aes.BlockSize))
 	}
 
 	bounds := append(append([]int{0}, cuts...), len(packed))
 	volumes := len(bounds) - 1
 	var files strings.Builder
+	volumeOf := map[string]int{}
 	for v := range volumes {
 		name := "album.rar"
 		if volumes > 1 {
 			name = fmt.Sprintf("album.part%d.rar", v+1)
 		}
+		extra := laterExtra
+		if v == 0 {
+			extra = firstExtra
+		}
 		volume := rar5Volume(member, int64(len(plain)), extra, packed[bounds[v]:bounds[v+1]], v, volumes)
-		files.WriteString(postVolume(server, name, volume))
+		file, messageIDs := postVolume(server, name, volume)
+		files.WriteString(file)
+		for _, id := range messageIDs {
+			volumeOf[id] = v
+		}
 	}
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-` + head + "\n" + files.String() + `</nzb>`
+` + head + "\n" + files.String() + `</nzb>`, volumeOf
+}
+
+// encryptCBC pads plain with zeros to a whole AES block and encrypts it as one
+// CBC chain.
+func encryptCBC(t *testing.T, key, iv, plain []byte) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed := make([]byte, (len(plain)+aes.BlockSize-1)/aes.BlockSize*aes.BlockSize)
+	copy(packed, plain)
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(packed, packed)
+	return packed
+}
+
+// rar5EncryptionExtra encodes a file header's extra area holding one
+// encryption record: type, version 0, flags 0, KDF count, an all-zero salt,
+// then iv.
+func rar5EncryptionExtra(iv []byte) []byte {
+	record := []byte{0x01, 0x00, 0x00, downloadTestKDF}
+	record = append(record, make([]byte, 16)...)
+	record = append(record, iv...)
+	return append(binary.AppendUvarint(nil, uint64(len(record))), record...)
 }
 
 // rar5Volume lays out one RAR5 volume: signature, main header, the member's
@@ -342,11 +387,13 @@ func rar5Header(headerType, flags uint64, body, extra []byte, dataSize int) []by
 	return append(binary.LittleEndian.AppendUint32(nil, crc32.ChecksumIEEE(sized)), sized...)
 }
 
-// postVolume posts a volume as 128 KiB articles and returns its NZB <file>.
-func postVolume(server *nntpd.Server, name string, volume []byte) string {
+// postVolume posts a volume as 128 KiB articles and returns its NZB <file> and
+// the articles' message IDs.
+func postVolume(server *nntpd.Server, name string, volume []byte) (string, []string) {
 	const articleSize = 128 << 10
 	parts := (len(volume) + articleSize - 1) / articleSize
 	var segments strings.Builder
+	messageIDs := make([]string, 0, parts)
 	for part := range parts {
 		start := part * articleSize
 		end := min(start+articleSize, len(volume))
@@ -354,11 +401,12 @@ func postVolume(server *nntpd.Server, name string, volume []byte) string {
 		body := nntpd.Encode(volume[start:end], name, part+1, int64(len(volume)), int64(start))
 		server.AddArticle("<"+messageID+">", body)
 		fmt.Fprintf(&segments, "<segment bytes=\"%d\" number=\"%d\">%s</segment>\n", len(body), part+1, messageID)
+		messageIDs = append(messageIDs, messageID)
 	}
 	return fmt.Sprintf(`<file poster="poster" date="1" subject="&quot;%s&quot; yEnc (1/%d)">
 <groups><group>alt.test</group></groups>
 <segments>
 %s</segments>
 </file>
-`, name, parts, segments.String())
+`, name, parts, segments.String()), messageIDs
 }
