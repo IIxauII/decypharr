@@ -2,11 +2,15 @@ package usenet
 
 import (
 	"context"
+	"crypto/cipher"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
+	"github.com/sirrobot01/decypharr/internal/crypto"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sourcegraph/conc/pool"
 )
@@ -34,6 +38,24 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 
 	if len(file.Segments) == 0 {
 		return fmt.Errorf("file has no segments: %s", file.Name)
+	}
+
+	// The segments of an encrypted archive member carry AES ciphertext, so
+	// decrypt it on the way to the writer. Decryption overwrites each
+	// segment's data, which was fetched for this download alone and is not
+	// read again after the write.
+	write := writer.Write
+	var decrypter *cbcDecrypter
+	if file.IsEncrypted {
+		if len(file.EncryptionKey) == 0 {
+			return customerror.NewPermanentError(fmt.Errorf("%s is encrypted and the NZB has no password", file.Name))
+		}
+		// The stored size, key and IV won't change on a retry, so a bad one is
+		// permanent.
+		if decrypter, err = newCBCDecrypter(writer, file.EncryptionKey, file.EncryptionIV, file.Size); err != nil {
+			return customerror.NewPermanentError(fmt.Errorf("decrypt %s: %w", file.Name, err))
+		}
+		write = decrypter.write
 	}
 
 	// Track progress
@@ -78,7 +100,7 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 				pendingMu.Unlock()
 
 				// Write to output
-				n, err := writer.Write(data)
+				n, err := write(data)
 				if err != nil {
 					writeErrMu.Lock()
 					if writeErr == nil {
@@ -173,11 +195,94 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	if fetchErr != nil {
 		return fetchErr
 	}
+	if decrypter != nil {
+		if err := decrypter.finish(); err != nil {
+			return fmt.Errorf("decrypt %s: %w", file.Name, err)
+		}
+	}
 
-	u.logger.Info().
+	event := u.logger.Info().
 		Str("file", filename).
-		Int64("bytes", downloadedBytes.Load()).
-		Msg("Download complete")
+		Int64("bytes", downloadedBytes.Load())
+	if decrypter != nil {
+		event = event.Bool("decrypted", true)
+	}
+	event.Msg("Download complete")
 
+	return nil
+}
+
+// cbcDecrypter decrypts an encrypted RAR5 member as its segments arrive. The
+// ciphertext is one AES-256-CBC chain across all volumes, padded to a whole
+// block past the plaintext, and segments need not end on a block.
+type cbcDecrypter struct {
+	w     io.Writer
+	mode  cipher.BlockMode
+	carry [crypto.BlockSize]byte // start of a block the last write cut off
+	held  int                    // bytes in carry
+	left  int64                  // plaintext bytes still to write
+}
+
+// newCBCDecrypter returns a decrypter that writes the first size bytes of
+// plaintext to w.
+func newCBCDecrypter(w io.Writer, key, iv []byte, size int64) (*cbcDecrypter, error) {
+	if size <= 0 {
+		return nil, errors.New("the file has no size")
+	}
+	mode, err := crypto.NewDecrypter(key, iv)
+	if err != nil {
+		return nil, err
+	}
+	return &cbcDecrypter{w: w, mode: mode, left: size}, nil
+}
+
+// write decrypts p in place, after any partial block carried from the last
+// call, and writes the plaintext to w, dropping the padding past the
+// plaintext size. p must be the caller's to overwrite. It returns the number
+// of plaintext bytes written.
+func (d *cbcDecrypter) write(p []byte) (int, error) {
+	var written int
+	if d.held > 0 {
+		k := copy(d.carry[d.held:], p)
+		d.held += k
+		p = p[k:]
+		if d.held < crypto.BlockSize {
+			return 0, nil
+		}
+		d.held = 0
+		d.mode.CryptBlocks(d.carry[:], d.carry[:])
+		n, err := d.emit(d.carry[:])
+		written += n
+		if err != nil {
+			return written, err
+		}
+	}
+
+	whole := len(p) - len(p)%crypto.BlockSize
+	d.mode.CryptBlocks(p[:whole], p[:whole])
+	d.held = copy(d.carry[:], p[whole:])
+	n, err := d.emit(p[:whole])
+	return written + n, err
+}
+
+// emit writes plaintext to w up to the plaintext size.
+func (d *cbcDecrypter) emit(plain []byte) (int, error) {
+	plain = plain[:min(int64(len(plain)), d.left)]
+	if len(plain) == 0 {
+		return 0, nil
+	}
+	n, err := d.w.Write(plain)
+	d.left -= int64(n)
+	return n, err
+}
+
+// finish reports ciphertext that ended mid-block or short of the plaintext.
+func (d *cbcDecrypter) finish() error {
+	if d.held > 0 {
+		return fmt.Errorf("encrypted data ends %d bytes into an AES block", d.held)
+	}
+	if d.left > 0 {
+		return fmt.Errorf("encrypted data ends %d bytes short of the file size", d.left)
+	}
 	return nil
 }
