@@ -1,8 +1,11 @@
 package arr
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 )
 
@@ -75,5 +78,56 @@ func TestInferTypeIgnoresCase(t *testing.T) {
 		if got := inferType(tt.host, tt.name); got != tt.want {
 			t.Errorf("inferType(%q, %q) = %v, want %v", tt.host, tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestSyncFromConfigWarnsOnlyForUnknownDownloadAction(t *testing.T) {
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	arrs := New()
+	var logs bytes.Buffer
+	arrs.logger = zerolog.New(&logs)
+
+	arrs.SyncFromConfig([]config.Arr{
+		{Name: "sonarr", Host: "http://sonarr:8989", Token: "key", DownloadAction: "strm"},
+		{Name: "radarr", Host: "http://radarr:7878", Token: "key", DownloadAction: config.DownloadActionSymlink},
+		{Name: "lidarr", Host: "http://lidarr:8686", Token: "key"},
+	})
+
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want one warning, got %d lines:\n%s", len(lines), logs.String())
+	}
+	for _, want := range []string{`"level":"warn"`, `"arr":"sonarr"`, `"download_action":"strm"`} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("warning %s lacks %s", lines[0], want)
+		}
+	}
+}
+
+func TestDownloadActionSurvivesConfigSync(t *testing.T) {
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	if _, err := config.Update(func(c *config.Config) error {
+		c.Arrs = []config.Arr{{Name: "lidarr", Host: "http://lidarr:8686", Token: "key", DownloadAction: config.DownloadActionDownload}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	arrs := New()
+	if got, _ := arrs.Get("lidarr"); got.DownloadAction != config.DownloadActionDownload {
+		t.Fatalf("loaded download_action = %q, want %q", got.DownloadAction, config.DownloadActionDownload)
+	}
+
+	arrs.SyncFromConfig([]config.Arr{{Name: "lidarr", Host: "http://lidarr:8686", Token: "key", DownloadAction: config.DownloadActionNone}})
+	arrs.AddOrUpdate(Arr{Name: "radarr", Host: "http://radarr:7878", Token: "key", DownloadAction: config.DownloadActionSymlink})
+	got := map[string]config.DownloadAction{}
+	for _, c := range arrs.SyncToConfig() {
+		got[c.Name] = c.DownloadAction
+	}
+	if got["lidarr"] != config.DownloadActionNone || got["radarr"] != config.DownloadActionSymlink {
+		t.Fatalf("synced download_action = %v, want lidarr none, radarr symlink", got)
 	}
 }

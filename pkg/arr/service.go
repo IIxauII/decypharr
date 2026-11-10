@@ -44,6 +44,7 @@ func New() *Service {
 			request.WithMaxRetries(0),
 		),
 	}
+	service.warnUnknownDownloadActions(config.Get().Arrs)
 	for _, configured := range config.Get().Arrs {
 		instance := fromConfig(configured)
 		if !instance.Reachable() || utils.ValidateURL(instance.Host) != nil {
@@ -52,6 +53,15 @@ func New() *Service {
 		service.arrs[instance.Name] = instance
 	}
 	return service
+}
+
+func (s *Service) warnUnknownDownloadActions(configured []config.Arr) {
+	for _, c := range configured {
+		if c.DownloadAction != "" && !c.DownloadAction.Valid() {
+			s.logger.Warn().Str("arr", c.Name).Str("download_action", string(c.DownloadAction)).
+				Msg("Unknown download_action, falling back to default_download_action")
+		}
+	}
 }
 
 func (s *Service) Get(name string) (Arr, bool) {
@@ -131,6 +141,7 @@ func (s *Service) Clear() {
 }
 
 func (s *Service) SyncFromConfig(configured []config.Arr) {
+	s.warnUnknownDownloadActions(configured)
 	updated := make(map[string]Arr, len(configured))
 	for _, c := range configured {
 		updated[c.Name] = fromConfig(c)
@@ -176,6 +187,7 @@ func (s *Service) SyncToConfig() []config.Arr {
 		existing.SkipRepair = instance.SkipRepair
 		existing.DownloadUncached = instance.DownloadUncached
 		existing.SelectedDebrid = instance.SelectedDebrid
+		existing.DownloadAction = instance.DownloadAction
 		merged[instance.Name] = existing
 	}
 	return slices.Collect(maps.Values(merged))

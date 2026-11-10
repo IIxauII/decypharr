@@ -125,23 +125,42 @@ Decypharr supports multiple download actions configured per-Arr or globally:
 |--------|-------------|
 | `symlink` | Create symlink to mounted file (default) |
 | `download` | Download file to local storage |
-| `strm` | Create STRM file pointing to WebDAV URL |
 | `none` | No action (Arr manages files) |
 
-Set in `config.json`:
+STRM files are not a download action. They are a separate export that covers every completed
+download: see [STRM Files](../shares/webdav/#strm-files) and **Settings** → **General** → **STRM**.
+
+Set the global default with `default_download_action` and override it for one Arr with
+`download_action`:
 
 ```json
 {
+  "default_download_action": "symlink",
   "arrs": [
     {
-      "name": "Sonarr",
+      "name": "sonarr",
       "host": "http://sonarr:8989",
       "token": "ARR_API_KEY",
-      "download_action": "symlink"
+      "download_action": "download"
     }
   ]
 }
 ```
+
+In the Web UI, the global default is **Default Download Action** under **Settings** → **General**
+→ **qBittorrent & SABnzbd**, and each Arr has its own **Download Action** under **Settings** →
+**Arrs**. **Inherit default** leaves `download_action` empty.
+
+For each download, the first of these that is set wins:
+
+1. The request itself: **Sequential Download** on a qBittorrent add, which means `download`, or
+   the SABnzbd `action` field.
+2. The Arr's `download_action`. The Arr is found by the download's category, so its `name` must
+   match the category set in that Arr's download client.
+3. `default_download_action`.
+
+An empty or unknown value on the request or the Arr falls through to the next level. An unknown
+`download_action` on an Arr is logged as a warning when the Arrs load or are saved.
 
 ## Queue Cleanup
 
@@ -245,7 +264,7 @@ Enable `download_uncached` per-Arr:
 {
   "arrs": [
     {
-      "name": "Sonarr",
+      "name": "sonarr",
       "download_uncached": true
     }
   ]

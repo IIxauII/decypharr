@@ -108,10 +108,6 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if strings.ToLower(r.FormValue("sequentialDownload")) == "true" {
-		action = config.DownloadActionDownload
-	}
 
 	rmTrackerUrls := strings.ToLower(r.FormValue("firstLastPiecePrio")) == "true"
 
@@ -127,6 +123,11 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		// Arr is not in context
 		_arr = arr.Arr{Name: category}
 	}
+	var requested config.DownloadAction
+	if strings.ToLower(r.FormValue("sequentialDownload")) == "true" {
+		requested = config.DownloadActionDownload
+	}
+	action := config.ResolveDownloadAction(requested, _arr.DownloadAction, cfg.DefaultDownloadAction)
 	atleastOne := false
 
 	// Handle magnet URLs

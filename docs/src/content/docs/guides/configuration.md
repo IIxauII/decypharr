@@ -73,11 +73,14 @@ variables:
 
 ```json
 {
-  "max_active_downloads": 5
+  "max_active_downloads": 5,
+  "default_download_action": "symlink"
 }
 ```
 
 `max_active_downloads` is the shared active-processing limit for torrent and NZB downloads. Additional imports remain queued until an active download completes.
+
+`default_download_action` is what Decypharr does with a finished download when neither the request nor the Arr's `download_action` picks one: `symlink` (the default), `download` or `none`. Any other value acts as `symlink`. See [Download Actions](../arrs/#download-actions).
 
 ## Debrid Providers
 
@@ -457,12 +460,13 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 {
   "arrs": [
     {
-      "name": "Sonarr",
+      "name": "sonarr",
       "host": "http://sonarr:8989",
       "token": "API_TOKEN",
       "skip_repair": false,
       "download_uncached": false,
-      "selected_debrid": ""
+      "selected_debrid": "",
+      "download_action": ""
     }
   ]
 }
@@ -476,7 +480,10 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 | `skip_repair`       | Skip repair for this Arr         | `false`     |
 | `download_uncached` | Download uncached torrents       | `false`     |
 | `selected_debrid`   | Force specific Debrid provider   | `""` (auto) |
+| `download_action`   | Download action for this Arr     | `""`        |
 | `source`            | Config source (`auto`, `config`) | `config`    |
+
+An empty `download_action` inherits `default_download_action`. See [Download Actions](../arrs/#download-actions).
 
 ## Queue Cleanup
 

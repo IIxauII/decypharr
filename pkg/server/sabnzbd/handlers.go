@@ -296,11 +296,7 @@ func (s *SABnzbd) handleAddURL(w http.ResponseWriter, r *http.Request) {
 
 	urls := r.FormValue("name")
 
-	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if r.FormValue("action") != "" {
-		action = config.DownloadAction(r.FormValue("action"))
-	}
+	action := downloadAction(r, _arr)
 
 	if urls == "" {
 		s.writeError(w, "URL is required", http.StatusBadRequest)
@@ -374,11 +370,7 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := config.Get()
-	action := cfg.DefaultDownloadAction
-	if r.FormValue("action") != "" {
-		action = config.DownloadAction(r.FormValue("action"))
-	}
+	action := downloadAction(r, _arr)
 
 	var nzoIDs []string
 	var errors []string
@@ -465,6 +457,10 @@ func (s *SABnzbd) handleAddFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
+}
+
+func downloadAction(r *http.Request, a arr.Arr) config.DownloadAction {
+	return config.ResolveDownloadAction(config.DownloadAction(r.FormValue("action")), a.DownloadAction, config.Get().DefaultDownloadAction)
 }
 
 // handleVersion returns version information
