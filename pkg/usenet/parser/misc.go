@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,8 +26,7 @@ func getRARVolumeOrder(filename string) int {
 	// Old-style naming: .rar, .r00, .r01, ...
 	if ext == ".rar" {
 		// Check for .partXX.rar pattern (new style)
-		partPattern := regexp.MustCompile(`\.part(\d+)$`)
-		if matches := partPattern.FindStringSubmatch(base); len(matches) == 2 {
+		if matches := rarPartNumberPattern.FindStringSubmatch(base); len(matches) == 2 {
 			num, _ := strconv.Atoi(matches[1])
 			return num // .part01.rar = 1, .part02.rar = 2
 		}
@@ -52,8 +50,11 @@ func getRARVolumeOrder(filename string) int {
 	}
 
 	// Unknown pattern, put at end
-	return 999999
+	return rarUnknownVolumeOrder
 }
+
+// rarUnknownVolumeOrder is the volume key of a name that is no RAR volume.
+const rarUnknownVolumeOrder = 999999
 
 // getZIPVolumeOrder puts split volumes (.z01, .z02, ..., .z100) before the
 // terminal .zip file. Numeric comparison avoids lexicographic z100/z99 bugs.
@@ -69,6 +70,54 @@ func getZIPVolumeOrder(filename string) int {
 		}
 	}
 	return int(^uint(0)>>1) - 1
+}
+
+// sortGroupFiles puts a group's posted files in the order its processor reads
+// them: RAR and ZIP files by volume key, then subject file number; 7z files by
+// filename; everything else by subject file number. NZB order breaks every
+// remaining tie, so the order is total and sorting twice cannot change it.
+// RAR and ZIP names with no volume key, such as obfuscated ones, share one
+// key and fall back to file number and NZB order.
+func sortGroupFiles(group *FileGroup) {
+	files := group.Files
+	sort.Slice(files, func(i, j int) bool {
+		a, b := &files[i], &files[j]
+		switch group.Type {
+		case storage.NZBFileTypeRar:
+			if ka, kb := getRARVolumeOrder(a.Filename), getRARVolumeOrder(b.Filename); ka != kb {
+				return ka < kb
+			}
+		case storage.NZBFileTypeZip:
+			if ka, kb := getZIPVolumeOrder(a.Filename), getZIPVolumeOrder(b.Filename); ka != kb {
+				return ka < kb
+			}
+		case storage.NZBFileTypeSevenZip:
+			if a.Filename != b.Filename {
+				return a.Filename < b.Filename
+			}
+			return a.Order < b.Order
+		}
+		if a.Number != b.Number {
+			return a.Number < b.Number
+		}
+		return a.Order < b.Order
+	})
+}
+
+// hasVolumeName reports whether name is a volume name of the archive type
+// fileType. Every name counts for other types.
+func hasVolumeName(fileType storage.NZBFileType, name string) bool {
+	lower := strings.ToLower(name)
+	switch fileType {
+	case storage.NZBFileTypeRar:
+		return getRARVolumeOrder(lower) != rarUnknownVolumeOrder
+	case storage.NZBFileTypeZip:
+		return strings.HasSuffix(lower, ".zip") || zipPartPattern.MatchString(lower)
+	case storage.NZBFileTypeSevenZip:
+		return sevenZMainPattern.MatchString(lower) || sevenZPartPattern.MatchString(lower)
+	default:
+		return true
+	}
 }
 
 func wrapNZBFile(f *storage.NZBFile) ([]*storage.NZBFile, error) {
