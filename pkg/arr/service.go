@@ -55,8 +55,6 @@ func New() *Service {
 	return service
 }
 
-// warnUnknownDownloadActions names each Arr whose download_action the
-// downloader does not implement. Such a value is ignored at grab time.
 func (s *Service) warnUnknownDownloadActions(configured []config.Arr) {
 	for _, c := range configured {
 		if c.DownloadAction != "" && !c.DownloadAction.Valid() {

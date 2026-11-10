@@ -32,36 +32,16 @@ func TestResolveDownloadAction(t *testing.T) {
 }
 
 func TestArrDownloadActionJSON(t *testing.T) {
-	t.Run("decodes from config.json", func(t *testing.T) {
-		var got Arr
-		if err := json.Unmarshal([]byte(`{"name":"lidarr","download_action":"download"}`), &got); err != nil {
-			t.Fatal(err)
-		}
-		if got.DownloadAction != DownloadActionDownload {
-			t.Fatalf("download_action = %q, want %q", got.DownloadAction, DownloadActionDownload)
-		}
-	})
-	t.Run("round trips", func(t *testing.T) {
-		want := Arr{Name: "lidarr", Host: "http://lidarr:8686", Token: "key", DownloadAction: DownloadActionDownload}
-		data, err := json.Marshal(want)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got Arr
-		if err := json.Unmarshal(data, &got); err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatalf("round trip = %#v, want %#v", got, want)
-		}
-	})
-	t.Run("inherit is omitted", func(t *testing.T) {
-		data, err := json.Marshal(Arr{Name: "sonarr"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(data), "download_action") {
-			t.Fatalf("empty download_action was written: %s", data)
-		}
-	})
+	want := Arr{Name: "lidarr", Host: "http://lidarr:8686", Token: "key", DownloadAction: DownloadActionDownload}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Arr
+	if err := json.Unmarshal(data, &got); err != nil || got != want || !strings.Contains(string(data), `"download_action":"download"`) {
+		t.Fatalf("round trip of %s = %#v, %v", data, got, err)
+	}
+	if data, _ := json.Marshal(Arr{Name: "sonarr"}); strings.Contains(string(data), "download_action") {
+		t.Fatalf("empty download_action was written: %s", data)
+	}
 }

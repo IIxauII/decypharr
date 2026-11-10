@@ -160,8 +160,7 @@ For each download, the first of these that is set wins:
 3. `default_download_action`.
 
 An empty or unknown value on the request or the Arr falls through to the next level. An unknown
-`download_action` on an Arr is logged as a warning when the Arrs load. `default_download_action`
-is the last level: an unknown value there is not logged and acts as `symlink`.
+`download_action` on an Arr is logged as a warning when the Arrs load or are saved.
 
 ## Queue Cleanup
 
@@ -265,7 +264,7 @@ Enable `download_uncached` per-Arr:
 {
   "arrs": [
     {
-      "name": "Sonarr",
+      "name": "sonarr",
       "download_uncached": true
     }
   ]

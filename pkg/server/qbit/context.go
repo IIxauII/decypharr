@@ -148,8 +148,7 @@ func (q *QBit) authenticate(ctx context.Context, category, username, password st
 	instance, known := q.manager.Arr().Get(category)
 	if !known {
 		// Not in the registry yet: inherit download_uncached and download_action
-		// from a matching config entry, so neither falls back to the provider
-		// or global setting.
+		// from a matching config entry.
 		instance = arr.Arr{Name: category, Source: arr.SourceAuto}
 		for _, configured := range cfg.Arrs {
 			if configured.Name == category {

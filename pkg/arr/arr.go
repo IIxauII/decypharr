@@ -40,10 +40,9 @@ type Arr struct {
 	SkipRepair       bool   `json:"skip_repair"`
 	DownloadUncached *bool  `json:"download_uncached"`
 	SelectedDebrid   string `json:"selected_debrid,omitempty"`
-	// DownloadAction overrides the global default action for this instance.
-	// Empty inherits it.
+	Source           Source `json:"source,omitempty"`
+	// Empty inherits DefaultDownloadAction.
 	DownloadAction config.DownloadAction `json:"download_action,omitempty"`
-	Source         Source                `json:"source,omitempty"`
 }
 
 // Reachable reports whether the instance carries enough to be called.

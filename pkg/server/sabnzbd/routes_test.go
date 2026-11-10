@@ -1,9 +1,11 @@
 package sabnzbd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -201,6 +203,94 @@ func TestRouterQueueContracts(t *testing.T) {
 						t.Errorf("path %s, deleted=%v, error=%v", path, deleted, err)
 					}
 				}
+			}
+		})
+	}
+}
+
+// newDownloadActionTestSABnzbd configures Usenet so an NZB is queued before
+// any network work. lidarr is configured but not registered, so handlers get
+// it through the authenticate fallback.
+func newDownloadActionTestSABnzbd(t *testing.T) (*SABnzbd, *manager.Manager) {
+	t.Helper()
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	if _, err := config.Update(func(c *config.Config) error {
+		c.UseAuth = false
+		c.DownloadFolder = t.TempDir()
+		c.DefaultDownloadAction = config.DownloadActionSymlink
+		c.Arrs = []config.Arr{{Name: "lidarr", DownloadAction: config.DownloadActionDownload}}
+		c.Usenet = config.Usenet{
+			Providers:                []config.UsenetProvider{{Host: "127.0.0.1", Port: 1, MaxConnections: 1}},
+			MaxConnections:           1,
+			ProcessingMaxConnections: 1,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := manager.New()
+	t.Cleanup(func() {
+		if err := mgr.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	return New(mgr), mgr
+}
+
+func TestAddFileResolvesDownloadAction(t *testing.T) {
+	sab, mgr := newDownloadActionTestSABnzbd(t)
+	whisparr := httptest.NewServer(http.NotFoundHandler()) // authenticate probes registered arrs
+	t.Cleanup(whisparr.Close)
+	mgr.Arr().AddOrUpdate(arr.Arr{Name: "whisparr", Host: whisparr.URL, Token: "key", DownloadAction: config.DownloadActionNone})
+	router := sab.Routes()
+
+	for _, tc := range []struct {
+		name, category, action string
+		want                   config.DownloadAction
+	}{
+		{"arr setting", "lidarr", "", config.DownloadActionDownload},
+		{"registered arr setting", "whisparr", "", config.DownloadActionNone},
+		{"request wins over arr", "lidarr", "none", config.DownloadActionNone},
+		{"unknown request falls through to arr", "lidarr", "strm", config.DownloadActionDownload},
+		{"default for a category with no Arr", "sonarr", "", config.DownloadActionSymlink},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			file, err := form.CreateFormFile("name", tc.name+".nzb")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Write([]byte("queued before parsing")); err != nil {
+				t.Fatal(err)
+			}
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			query := url.Values{"mode": {"addfile"}, "cat": {tc.category}, "action": {tc.action}}
+			req := httptest.NewRequest(http.MethodPost, "/api/?"+query.Encode(), &body)
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+
+			var added AddNZBResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &added); err != nil {
+				t.Fatal(err)
+			}
+			if len(added.NzoIds) != 1 {
+				t.Fatalf("response = %#v", added)
+			}
+			entry, err := mgr.Queue().GetTorrent(added.NzoIds[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entry.Action != tc.want {
+				t.Fatalf("action = %q, want %q", entry.Action, tc.want)
 			}
 		})
 	}

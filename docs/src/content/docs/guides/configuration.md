@@ -460,7 +460,7 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 {
   "arrs": [
     {
-      "name": "Sonarr",
+      "name": "sonarr",
       "host": "http://sonarr:8989",
       "token": "API_TOKEN",
       "skip_repair": false,
@@ -480,11 +480,10 @@ See the [Health Checker & Repair guide](../repair/) for the full model, API, and
 | `skip_repair`       | Skip repair for this Arr         | `false`     |
 | `download_uncached` | Download uncached torrents       | `false`     |
 | `selected_debrid`   | Force specific Debrid provider   | `""` (auto) |
-| `download_action`   | Download action for this Arr     | inherited   |
+| `download_action`   | Download action for this Arr     | `""`        |
 | `source`            | Config source (`auto`, `config`) | `config`    |
 
-`download_action` takes `symlink`, `download` or `none` and overrides `default_download_action`
-for this Arr. Leave it empty to inherit. See [Download Actions](../arrs/#download-actions).
+An empty `download_action` inherits `default_download_action`. See [Download Actions](../arrs/#download-actions).
 
 ## Queue Cleanup
 

@@ -1641,9 +1641,8 @@ class ConfigManager {
                 token: tokenInput.value,
                 skip_repair: skipRepairInput.checked,
                 selected_debrid: selectedDebridInput.value,
-                // Always sent, "" for inherit: the server merges the posted arrs
-                // onto the stored ones by position, so an omitted field would
-                // keep whatever the Arr stored in that slot had.
+                // Always sent ("" = inherit): the server merges arrs by position,
+                // so an omitted field keeps the previous Arr's value in that slot.
                 download_action: downloadActionInput.value,
                 source: sourceInput.value
             };
