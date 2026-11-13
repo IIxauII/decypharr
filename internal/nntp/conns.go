@@ -225,6 +225,9 @@ type Connection struct {
 	// bodySource supplies caller-owned storage on demand for one response.
 	// The owning read installs and clears it; Close must not touch it.
 	bodySource BodyBuffer
+	// lastMeta is the yEnc metadata of the last body decoded without error,
+	// so callers can check it against the segment they asked for.
+	lastMeta nntpyenc.DecoderMeta
 
 	// Body-decode idle tracking. lastProgressNS is refreshed by bodyReader
 	// while source reads make progress; idleNS is armed by
@@ -448,8 +451,37 @@ func (c *Connection) requestBodyBuffered(messageID string, dst []byte, source Bo
 	if err := c.sendCommandArg("BODY", messageID); err != nil {
 		return nntpyenc.BodyResult{}, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
 	}
-	return c.readBodyBuffered(dst, source, pooled)
+	res, err := c.readBodyBuffered(dst, source, pooled)
+	if err == nil {
+		err = c.rejectForeignBody(&res, messageID, pooled)
+	}
+	return res, err
 }
+
+// rejectForeignBody fails a 222 response whose echoed message-id differs
+// from the requested one (RFC 3977 "222 n message-id"): the connection is
+// then out of step with its commands. Providers that hold duplicate posts
+// echo the requested id, so this is hardening, not the duplicate check.
+func (c *Connection) rejectForeignBody(res *nntpyenc.BodyResult, requested string, pooled bool) error {
+	fields := strings.Fields(res.Message)
+	if len(fields) < 3 || fields[0] != "222" || fields[2] == requested ||
+		!strings.HasPrefix(fields[2], "<") || !strings.HasSuffix(fields[2], ">") {
+		return nil
+	}
+	if pooled {
+		putBodyBuf(res.Data)
+	}
+	res.Data = nil
+	_ = c.Close()
+	return NewConnectionError(fmt.Errorf("BODY %s answered with %s: connection out of step with its commands", requested, fields[2]))
+}
+
+// LastBodyMeta returns the yEnc metadata of the last body this connection
+// decoded without error.
+func (c *Connection) LastBodyMeta() nntpyenc.DecoderMeta { return c.lastMeta }
+
+// ResetBodyMeta clears LastBodyMeta before a new request.
+func (c *Connection) ResetBodyMeta() { c.lastMeta = nntpyenc.DecoderMeta{} }
 
 func (c *Connection) readBodyBuffered(dst []byte, source BodyBuffer, pooled bool) (nntpyenc.BodyResult, error) {
 	if !pooled {
@@ -488,6 +520,7 @@ func (c *Connection) readBodyBuffered(dst []byte, source BodyBuffer, pooled bool
 		res.Data = nil
 		return res, classifyNNTPError(res.StatusCode, res.Message)
 	}
+	c.lastMeta = res.Meta
 	return res, nil
 }
 
@@ -604,6 +637,8 @@ type DecodedBodyResult struct {
 	Body  []byte
 	Bytes int64
 	Error error
+	// Meta is the article's yEnc metadata (zero when not decoded).
+	Meta nntpyenc.DecoderMeta
 }
 
 // PipelineBodies sends multiple BODY commands with one flush and decodes their
@@ -657,6 +692,18 @@ func (c *Connection) PipelineBodies(messageIDs []string, destinations []BodyDest
 		}
 		pooled := destination.Writer != nil
 		res, err := c.readBodyBuffered(destination.Buffer, destination.BufferSource, pooled)
+		if err == nil {
+			if foreignErr := c.rejectForeignBody(&res, FormatMessageID(messageIDs[i]), pooled); foreignErr != nil {
+				batchErr := fmt.Errorf("BODY pipeline article %d/%d: %w", i+1, len(messageIDs), foreignErr)
+				for j := i; j < len(results); j++ {
+					if !destinations[j].Skip {
+						results[j].Error = batchErr
+					}
+				}
+				return results, batchErr
+			}
+			results[i].Meta = res.Meta
+		}
 		if err == nil {
 			if destination.Writer == nil {
 				results[i].Body = res.Data

@@ -27,6 +27,10 @@ const (
 	ErrorTypeProtocol
 	ErrorTypeYencDecode
 	ErrorTypeNoAvailableConnection
+	// ErrorTypeWrongArticle: a CRC-valid body that is not the requested
+	// segment (providers can keep several posts under one message-id and
+	// return either copy per connection).
+	ErrorTypeWrongArticle
 )
 
 // Error represents an NNTP-specific error
@@ -106,6 +110,8 @@ func (et ErrorType) String() string {
 		return "PROTOCOL"
 	case ErrorTypeYencDecode:
 		return "YENC_DECODE"
+	case ErrorTypeWrongArticle:
+		return "WRONG_ARTICLE"
 	default:
 		return "UNKNOWN"
 	}
@@ -134,6 +140,22 @@ func NewProtocolError(code int, message string) *Error {
 		Code:    code,
 		Message: message,
 	}
+}
+
+// NewWrongArticleError reports a decoded body that does not match the
+// segment it was requested for. It is never a success.
+func NewWrongArticleError(err error) *Error {
+	return &Error{
+		Type:    ErrorTypeWrongArticle,
+		Message: "provider returned a different article",
+		Err:     err,
+	}
+}
+
+// IsWrongArticleError reports whether err is (or wraps) a wrong-article error.
+func IsWrongArticleError(err error) bool {
+	var nntpErr *Error
+	return errors.As(err, &nntpErr) && nntpErr.Type == ErrorTypeWrongArticle
 }
 
 func NewYencDecodeError(err error) *Error {

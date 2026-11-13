@@ -838,6 +838,14 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 	return nil
 }
 
+// isMissingArticle reports an article that cannot be served from any
+// provider: missing (430), or a message-id whose every copy reached was
+// another post's article (providers can hold several posts under one id).
+// Both are permanent for this file and should trigger a reacquire.
+func isMissingArticle(err error) bool {
+	return nntp.IsArticleNotFoundError(err) || nntp.IsWrongArticleError(err)
+}
+
 // FileHandle is a pull-based handle over one usenet file, backed by the
 // entry's shared reader through a private cursor. It holds the entry
 // refcount for its lifetime (blocking idle teardown) and releases it on
@@ -893,9 +901,10 @@ func (h *FileHandle) ReadAtContext(ctx context.Context, p []byte, off int64) (in
 	if err != nil && ctx != nil && ctx.Err() != nil {
 		return n, ctx.Err()
 	}
-	if err != nil && nntp.IsArticleNotFoundError(err) {
-		h.u.failedFiles.Store(h.failureKey, err)
-		return n, customerror.NewArticleNotFoundError(err)
+	if err != nil && isMissingArticle(err) {
+		notFound := customerror.NewArticleNotFoundError(err)
+		h.u.failedFiles.Store(h.failureKey, notFound)
+		return n, notFound
 	}
 	return n, err
 }
@@ -1004,10 +1013,11 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	}
 
 	// Mark file as failed if article not found (permanent error)
-	if err != nil && nntp.IsArticleNotFoundError(err) {
-		u.failedFiles.Store(fsKey(nzoID, filename), err)
+	if err != nil && isMissingArticle(err) {
+		notFound := customerror.NewArticleNotFoundError(err)
+		u.failedFiles.Store(fsKey(nzoID, filename), notFound)
 		// Wrap error to mark as permanent
-		return customerror.NewArticleNotFoundError(err)
+		return notFound
 	}
 
 	return err

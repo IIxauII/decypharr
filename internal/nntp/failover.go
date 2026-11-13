@@ -11,6 +11,10 @@ import (
 	"github.com/sirrobot01/decypharr/internal/customerror"
 )
 
+// wrongArticleAttempts bounds how many connections of one provider are
+// tried for a message-id that keeps returning another post's article.
+const wrongArticleAttempts = 3
+
 // ExecuteWithFailover retries transient failures and changes providers.
 // Article failures exclude their backbone for the rest of the operation.
 func (c *Client) ExecuteWithFailover(ctx context.Context, workload Workload, fn func(conn *Connection) error) error {
@@ -22,7 +26,8 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, workload Workload, fn 
 	var previousHost string
 	var attempts map[string]int
 	perProvider := max(1, c.retries+1)
-	for range len(c.providers) * perProvider {
+	var wrongArticle map[string]int
+	for range len(c.providers) * max(perProvider, wrongArticleAttempts) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -44,9 +49,22 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, workload Workload, fn 
 			break
 		}
 		err = c.safeExecute(conn, fn)
-		transient, excludeArticle, discard := false, false, false
+		transient, excludeArticle, discard, retrySame := false, false, false, false
 		if typed, ok := errors.AsType[*Error](err); ok {
 			switch typed.Type {
+			case ErrorTypeWrongArticle:
+				// The provider served another post's copy of this
+				// message-id. Another connection can reach a backend with
+				// the genuine copy: drop this one (the pool is LIFO and
+				// would hand it straight back), retry a few times, then
+				// treat the article as missing on this backbone.
+				discard = true
+				if wrongArticle == nil {
+					wrongArticle = make(map[string]int)
+				}
+				wrongArticle[provider.ID()]++
+				excludeArticle = wrongArticle[provider.ID()] >= wrongArticleAttempts
+				retrySame = !excludeArticle
 			case ErrorTypeArticleNotFound, ErrorTypeYencDecode:
 				excludeArticle = true
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
@@ -76,6 +94,8 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, workload Workload, fn 
 		switch {
 		case excludeArticle:
 			excludeForArticleNotFound(&exclusions, provider)
+		case retrySame:
+			// retry the same provider on a different connection
 		case transient:
 			previousHost = provider.Host
 			if attempts[providerID] >= perProvider {

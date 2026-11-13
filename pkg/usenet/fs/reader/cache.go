@@ -263,6 +263,13 @@ func (sc *SegmentCache) ReadRangeInto(segIdx int, segOffset, length int64, dst [
 		sc.stats.CacheMisses.Add(1)
 		return 0, false
 	}
+	if expected := sc.segOffsets[segIdx+1] - sc.segOffsets[segIdx]; size < expected && segOffset+length > size {
+		// A stored segment shorter than its table entry is a miss, not
+		// (0, true) at its end: readFromCache then re-fetches instead of
+		// serving a hole.
+		sc.stats.CacheMisses.Add(1)
+		return 0, false
+	}
 	if segOffset+length > size {
 		length = size - segOffset
 	}
@@ -315,6 +322,8 @@ type segmentWriter interface {
 	Write(p []byte) (int, error)
 	DecodeBuffer() []byte
 	Adopt(decoded []byte) (int64, error)
+	// Stored reports the segment bytes Finalize would publish.
+	Stored() int64
 	Finalize()
 	Discard()
 }
@@ -394,6 +403,13 @@ func (w *memorySegmentWriter) Write(p []byte) (int, error) {
 }
 
 func (w *memorySegmentWriter) Discard() { w.resident, w.decodeBuf = nil, nil }
+
+func (w *memorySegmentWriter) Stored() int64 {
+	if w.resident == nil {
+		return 0
+	}
+	return int64(len(w.resident.data))
+}
 
 func (w *memorySegmentWriter) Finalize() {
 	if w.cache == nil || w.resident == nil || len(w.resident.data) == 0 {
@@ -551,10 +567,12 @@ func (w *bufferStreamWriter) Write(p []byte) (int, error) {
 	return consumed + len(p), nil
 }
 
-// Discard is a no-op for the buffer writer: the buffer slot is fixed-offset
-// and gets overwritten in place on the next attempt, so there's nothing
-// to release on a failed/partial write.
-func (w *bufferStreamWriter) Discard() {}
+// Discard rewinds the writer: the buffer slot is fixed-offset and gets
+// overwritten in place, so a failover copy must start at the segment start
+// rather than append to (or be dropped after) a rejected body.
+func (w *bufferStreamWriter) Discard() { w.skipped, w.written = 0, 0 }
+
+func (w *bufferStreamWriter) Stored() int64 { return w.written }
 
 // Finalize commits the segment to the cache: state to OnDisk, length
 // recorded, waiters woken.

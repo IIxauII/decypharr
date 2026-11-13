@@ -520,6 +520,12 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 			}
 		}
 
+		if int64(n) < copyLen {
+			// Never a short count with a nil error (io.ReaderAt): the caller
+			// would splice the next segment's bytes after a stale gap.
+			return totalRead + n, fmt.Errorf("segment %d holds %d of the %d bytes the table maps to it: %w",
+				segIdx, sr.cache.SegmentDataSize(segIdx), segEnd-segStart, ErrShortSegment)
+		}
 		totalRead += n
 		filled = readEnd
 	}

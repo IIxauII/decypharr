@@ -261,7 +261,7 @@ func TestRequestBodyDecodesAndReusesConnection(t *testing.T) {
 	)
 
 	for i, want := range [][]byte{first, second} {
-		res, err := c.requestBody("<x@y>")
+		res, err := c.requestBody([]string{"<a@b>", "<c@d>"}[i])
 		if err != nil {
 			t.Fatalf("requestBody %d: %v", i+1, err)
 		}

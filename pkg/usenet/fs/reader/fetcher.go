@@ -26,6 +26,9 @@ type SegmentFetcher struct {
 	inFlight   map[int]*fetchPromise
 	inFlightMu sync.Mutex
 
+	// validator checks each decoded body against its segment before commit.
+	validator *segmentValidator
+
 	// Background prefetch
 	scheduler      *FetchScheduler
 	ownedScheduler bool
@@ -75,6 +78,7 @@ func NewSegmentFetcher(
 		logger:   logger.With().Str("component", "fetcher").Logger(),
 		stats:    stats,
 		inFlight: make(map[int]*fetchPromise),
+		validator: newSegmentValidator(cache.segments),
 		// A packed bitmap avoids per-segment goroutines and large bool arrays.
 		prefetchQueued: make([]atomic.Uint64, (cache.SegmentCount()+63)/64),
 		ctx:            ctx,
@@ -287,6 +291,7 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx int, worklo
 
 		var n int64
 		var err error
+		conn.ResetBodyMeta()
 		if sf.cache.memoryMode {
 			var decoded []byte
 			decoded, err = conn.DecodeBodyWithBuffer(messageID, writer)
@@ -316,6 +321,10 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx int, worklo
 				Type:    nntp.ErrorTypeArticleNotFound,
 				Message: "article produced no data after decoding",
 			}
+		}
+		if err := sf.validator.check(segIdx, writer.Stored(), conn.LastBodyMeta()); err != nil {
+			writer.Discard()
+			return err
 		}
 
 		// Commit (updates cache state to StateOnDisk).
@@ -602,13 +611,33 @@ func (sf *SegmentFetcher) fetchPrefetchBatch(ctx context.Context, segIndices []i
 				bodyErrors[i] = nil
 				if result.Error == nil && destinations[i].Writer == nil {
 					if n, adoptErr := writers[i].Adopt(result.Body); adoptErr == nil && n > 0 {
+						if checkErr := sf.validator.check(claims[i].segIdx, n, result.Meta); checkErr != nil {
+							// Never commit; let failover try another copy.
+							writers[i].Discard()
+							decoded[i] = nil
+							bodyErrors[i] = checkErr
+							if decodeErr == nil {
+								decodeErr = checkErr
+							}
+							continue
+						}
 						// Failover must not overwrite storage already accepted by this writer.
 						written[i] = n
 						destinations[i].Skip = true
 						decoded[i] = nil
 					}
 				}
-			} else if result.Bytes > 0 {
+			} else if result.Bytes > 0 && result.Error == nil {
+				if checkErr := sf.validator.check(claims[i].segIdx, writers[i].Stored(), result.Meta); checkErr != nil {
+					// The bytes are already in the buffer slot: rewind the
+					// writer so a retry starts at the segment start.
+					writers[i].Discard()
+					bodyErrors[i] = checkErr
+					if decodeErr == nil {
+						decodeErr = checkErr
+					}
+					continue
+				}
 				written[i] = result.Bytes
 				bodyErrors[i] = nil
 			} else if result.Error != nil {
@@ -653,6 +682,11 @@ func (sf *SegmentFetcher) fetchPrefetchBatch(ctx context.Context, segIndices []i
 		}
 		if writeErr == nil && n == 0 {
 			writeErr = &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Message: "article produced no data after decoding"}
+		}
+		if writeErr == nil && writer.Stored() < sf.cache.GetSegment(claim.segIdx).Bytes {
+			// Last gate: nothing shorter than its table entry is published.
+			writeErr = nntp.NewWrongArticleError(fmt.Errorf("segment %d: %d of %d bytes stored: %w",
+				claim.segIdx, writer.Stored(), sf.cache.GetSegment(claim.segIdx).Bytes, ErrShortSegment))
 		}
 		if writeErr != nil {
 			writer.Discard()
@@ -702,7 +736,7 @@ retryLoop:
 		if err = sf.fetchPrefetchBatch(fetchCtx, segIndices); err == nil {
 			break
 		}
-		if nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err) || fetchCtx.Err() != nil {
+		if nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err) || nntp.IsWrongArticleError(err) || fetchCtx.Err() != nil {
 			break
 		}
 		if nntp.IsAllProvidersFailed(err) && attempt >= 1 {
@@ -807,7 +841,7 @@ func (sf *SegmentFetcher) fetchWithRetryDirect(ctx context.Context, segIdx int, 
 		lastErr = err
 
 		// Don't retry permanent errors or cancellations.
-		if nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err) || ctx.Err() != nil || sf.ctx.Err() != nil {
+		if nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err) || nntp.IsWrongArticleError(err) || ctx.Err() != nil || sf.ctx.Err() != nil {
 			return err
 		}
 		// The failover layer already retried per provider and across
